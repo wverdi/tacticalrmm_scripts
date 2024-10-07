@@ -1,3 +1,7 @@
+# SQLlite é necessário para execucao do Script, efetue o download em https://www.sqlite.org/download.html ou instale utilizando o repositório do TacticalRMM.
+# Chave de API do file.io
+$apiKey = "sua_api_key"
+
 # Diretórios dos históricos dos navegadores
 $browserPaths = @{
     "Chrome"  = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History"
@@ -152,8 +156,6 @@ $outputFilePath = Join-Path -Path $tempDirectory -ChildPath "browsing_history.ht
 $htmlOutput = Create-HtmlOutput -Histories $histories -UserName $userName -HostName $hostName
 [System.IO.File]::WriteAllText($outputFilePath, $htmlOutput, [System.Text.Encoding]::UTF8)
 
-# Chave de API
-$apiKey = "sua_api_key"
 
 # Cabeçalhos e corpo para a requisição HTTP
 $boundary = [System.Guid]::NewGuid().ToString()
